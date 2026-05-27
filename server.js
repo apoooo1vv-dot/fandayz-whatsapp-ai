@@ -4,48 +4,69 @@ const app = express();
 app.use(express.json());
 
 const VERIFY_TOKEN = "fandayz_verify_token";
-
 const PHONE_NUMBER_ID = "1184335808086817";
-const ACCESS_TOKEN = "EAASrkjRHwHwBRq8Y90rBJYoVZAR3NiSm1oeIRYah7qxxQQQ8OZCrGh0k4lK5bQsLtUj9gDwzzNxbYNZATNZARZAxRvWvdFMlTGBbZAQCAZBapVQy5iXAJB1lfwgtbO5UlUBIYnVvtgMT3N61hWio5FRU379xBzSZCY8sHccKrlxf5BRoJg6dphFtMG4NqBRHiSwmJ8ckwbZBTJIS2zZCfq8ds8MTCLGI5ai0ZBwFyJarBlBp5a8VV9fCXCi1tBs5yTSCNXhJdTcuyB5d8v6vYa8R7HgxwZDZD";
+
+const ACCESS_TOKEN = "EAASrkjRHwHwBRvR0Ab2v88XeAkftCBenR3HtxpApRI7OyZAFxZCI3CljPDtf12VAXORYXNuau2qN4PbPwYZCZAhVvP6IRGUcLBzNoGWg3o7zyYK2ZBH2z6QRWNZBDqz2PiY3Fiv0XybtJtJa0kgiT1XCxr5OZB8ASZAaKrsC7ZBODQQalHbP8D3uHPXC71YTJZBm6vSSlVFir0uWylalC2vWnNF0NE8w1YcFqgkAn8NFYpiukYJYlL8OARgdZA4oeXblCICHnv1oLNYgJ0UHcLucuHv";   // ← حط توكن ميتا هنا
+const OPENAI_API_KEY = "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"; // ← حط توكن OpenAI هنا
 
 app.get("/", (req, res) => {
   res.send("WhatsApp AI Server Running");
 });
 
 app.get("/webhook", (req, res) => {
-  const mode = req.query["hub.mode"];
-  const token = req.query["hub.verify_token"];
-  const challenge = req.query["hub.challenge"];
-
-  if (mode === "subscribe" && token === VERIFY_TOKEN) {
-    return res.status(200).send(challenge);
+  if (
+    req.query["hub.mode"] === "subscribe" &&
+    req.query["hub.verify_token"] === VERIFY_TOKEN
+  ) {
+    return res.status(200).send(req.query["hub.challenge"]);
   }
-
-  return res.sendStatus(403);
+  res.sendStatus(403);
 });
 
 app.post("/webhook", async (req, res) => {
   try {
     const message = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+    if (!message) return res.sendStatus(200);
 
-    if (message) {
-      const from = message.from;
+    const from = message.from;
+    const userText = message.text?.body || "مرحبا";
 
-      await fetch(`https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${ACCESS_TOKEN}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          messaging_product: "whatsapp",
-          to: from,
-          text: {
-            body: "تم استلام رسالتك 🤖🔥"
+    const aiResponse = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "system",
+            content: "أنت موظف خدمة عملاء ذكي لمشروع Fandayz. رد بالعربي بأسلوب محترم، مختصر، وواضح. خلك لبق وساعد العميل يكمل الطلب."
+          },
+          {
+            role: "user",
+            content: userText
           }
-        })
-      });
-    }
+        ]
+      })
+    });
+
+    const aiData = await aiResponse.json();
+    const reply = aiData.choices?.[0]?.message?.content || "أهلًا، كيف أقدر أخدمك؟";
+
+    await fetch(`https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${ACCESS_TOKEN}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        to: from,
+        text: { body: reply }
+      })
+    });
 
     res.sendStatus(200);
   } catch (error) {
