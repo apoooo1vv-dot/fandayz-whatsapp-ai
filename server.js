@@ -1,81 +1,126 @@
+/**
+ * Fandayz WhatsApp AI Agent - Server
+ * سيرفر وكيل الذكاء الاصطناعي لخدمة عملاء فاندايز
+ *
+ * @version 2.0.0
+ */
+
+// تحميل متغيرات البيئة (في التطوير المحلي فقط)
+require("dotenv").config();
+
 const express = require("express");
+const webhookRoutes = require("./src/handlers/webhookRoutes");
+const { getStats } = require("./src/services/memory");
+
 const app = express();
 
+// ===== Middleware =====
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-const VERIFY_TOKEN = "fandayz_verify_token";
-const PHONE_NUMBER_ID = "1184335808086817";
+// Logging middleware بسيط
+app.use((req, res, next) => {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] ${req.method} ${req.path}`);
+  next();
+});
 
-const ACCESS_TOKEN = "EAASrkjRHwHwBRvR0Ab2v88XeAkftCBenR3HtxpApRI7OyZAFxZCI3CljPDtf12VAXORYXNuau2qN4PbPwYZCZAhVvP6IRGUcLBzNoGWg3o7zyYK2ZBH2z6QRWNZBDqz2PiY3Fiv0XybtJtJa0kgiT1XCxr5OZB8ASZAaKrsC7ZBODQQalHbP8D3uHPXC71YTJZBm6vSSlVFir0uWylalC2vWnNF0NE8w1YcFqgkAn8NFYpiukYJYlL8OARgdZA4oeXblCICHnv1oLNYgJ0UHcLucuHv";   // ← حط توكن ميتا هنا
-const OPENAI_API_KEY = "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"; // ← حط توكن OpenAI هنا
+// ===== Routes =====
 
+/**
+ * GET / - الصفحة الرئيسية (Health Check)
+ * يُستخدم للتحقق من أن السيرفر يعمل
+ */
 app.get("/", (req, res) => {
-  res.send("WhatsApp AI Server Running");
+  res.json({
+    status: "running",
+    service: "Fandayz WhatsApp AI Agent",
+    version: "2.0.0",
+    timestamp: new Date().toISOString(),
+    message: "السيرفر يعمل بشكل طبيعي",
+  });
 });
 
-app.get("/webhook", (req, res) => {
-  if (
-    req.query["hub.mode"] === "subscribe" &&
-    req.query["hub.verify_token"] === VERIFY_TOKEN
-  ) {
-    return res.status(200).send(req.query["hub.challenge"]);
-  }
-  res.sendStatus(403);
+/**
+ * GET /health - فحص صحة السيرفر
+ */
+app.get("/health", (req, res) => {
+  const stats = getStats();
+  res.json({
+    status: "healthy",
+    uptime: process.uptime(),
+    memory: process.memoryUsage(),
+    activeSessions: stats.activeSessions,
+    environment: {
+      hasWhatsAppToken: !!process.env.WHATSAPP_TOKEN,
+      hasPhoneNumberId: !!process.env.PHONE_NUMBER_ID,
+      hasVerifyToken: !!process.env.VERIFY_TOKEN,
+      hasOpenAIKey: !!process.env.OPENAI_API_KEY,
+    },
+  });
 });
 
-app.post("/webhook", async (req, res) => {
-  try {
-    const message = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
-    if (!message) return res.sendStatus(200);
-
-    const from = message.from;
-    const userText = message.text?.body || "مرحبا";
-
-    const aiResponse = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: [
-          {
-            role: "system",
-            content: "أنت موظف خدمة عملاء ذكي لمشروع Fandayz. رد بالعربي بأسلوب محترم، مختصر، وواضح. خلك لبق وساعد العميل يكمل الطلب."
-          },
-          {
-            role: "user",
-            content: userText
-          }
-        ]
-      })
-    });
-
-    const aiData = await aiResponse.json();
-    const reply = aiData.choices?.[0]?.message?.content || "أهلًا، كيف أقدر أخدمك؟";
-
-    await fetch(`https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${ACCESS_TOKEN}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        messaging_product: "whatsapp",
-        to: from,
-        text: { body: reply }
-      })
-    });
-
-    res.sendStatus(200);
-  } catch (error) {
-    console.error("Error:", error);
-    res.sendStatus(500);
-  }
+/**
+ * GET /stats - إحصائيات المحادثات (للمراقبة)
+ */
+app.get("/stats", (req, res) => {
+  const stats = getStats();
+  res.json({
+    ...stats,
+    timestamp: new Date().toISOString(),
+  });
 });
 
+// Webhook Routes
+app.use("/", webhookRoutes);
+
+// ===== Error Handling =====
+app.use((err, req, res, next) => {
+  console.error("[Server] خطأ غير متوقع:", err.message);
+  res.status(500).json({
+    error: "خطأ داخلي في السيرفر",
+    message: err.message,
+  });
+});
+
+// 404 Handler
+app.use((req, res) => {
+  res.status(404).json({
+    error: "المسار غير موجود",
+    path: req.path,
+  });
+});
+
+// ===== Server Startup =====
+// مهم: Railway يتطلب الاستماع على 0.0.0.0 وليس localhost
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+const HOST = "0.0.0.0";
+
+app.listen(PORT, HOST, () => {
+  console.log("==================================================");
+  console.log("Fandayz WhatsApp AI Agent v2.0.0");
+  console.log("==================================================");
+  console.log("السيرفر يعمل على: http://" + HOST + ":" + PORT);
+  console.log("Health Check: http://" + HOST + ":" + PORT + "/health");
+  console.log("Webhook URL: http://" + HOST + ":" + PORT + "/webhook");
+  console.log("==================================================");
+
+  // التحقق من المتغيرات المطلوبة
+  const requiredVars = [
+    "WHATSAPP_TOKEN",
+    "PHONE_NUMBER_ID",
+    "VERIFY_TOKEN",
+    "OPENAI_API_KEY",
+  ];
+  const missingVars = requiredVars.filter((v) => !process.env[v]);
+
+  if (missingVars.length > 0) {
+    console.warn("تحذير - متغيرات البيئة الناقصة: " + missingVars.join(", "));
+    console.warn("اضفها في Railway Environment Variables");
+  } else {
+    console.log("جميع متغيرات البيئة موجودة");
+  }
+  console.log("==================================================");
 });
+
+module.exports = app;
