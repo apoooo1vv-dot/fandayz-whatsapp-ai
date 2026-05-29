@@ -1,41 +1,41 @@
 /**
  * Message Handler - معالج الرسائل الرئيسي
  * يستقبل رسائل واتساب ويعالجها ويرد عليها
+ * مع دعم Human Handoff الكامل وحفظ البيانات في Supabase
  */
 
 const { sendTextMessage, markAsRead } = require("../services/whatsapp");
-const { getAIResponse, checkHandoffRequest } = require("../services/openai");
+const { getAIResponse, checkHandoffRequest, detectCustomerData } = require("../services/openai");
 const {
-  getHistory,
-  addMessage,
-  isHumanHandoff,
-  setHumanHandoff,
-} = require("../services/memory");
+  getOrCreateCustomer,
+  updateCustomer,
+  getCustomerHandoffStatus,
+  setCustomerHandoff,
+  saveMessage,
+  getRecentMessages,
+} = require("../services/supabase");
+// Fallback in-memory for when Supabase is not configured
+const memoryFallback = require("../services/memory");
 
 /**
- * رسالة التحويل للموظف البشري
+ * رسالة التحويل النهائية للموظف البشري
  */
-const HANDOFF_MESSAGE = `شكرًا لتواصلك معنا! 🙏
+const HANDOFF_FINAL_MESSAGE = `تم استلام بياناتك ✅
 
-سيتواصل معك أحد موظفينا في أقرب وقت ممكن.
+سيتم تحويل المحادثة الآن لموظف خدمة العملاء لاستكمال الإجراءات.
 
 ⏰ أوقات العمل: السبت - الخميس، 9 صباحًا - 6 مساءً
 
-إذا كان طلبك عاجلًا، يمكنك التواصل مباشرة على:
-📞 [رقم التواصل - يُضاف لاحقًا]
-
-شكرًا لصبرك! يسعدنا خدمتك 😊`;
+شكرًا لتواصلك معنا 🌹`;
 
 /**
  * رسالة وضع الموظف البشري (عندما يكون التحويل مفعّلًا)
  */
-const HUMAN_MODE_MESSAGE = `أنت حاليًا متصل مع فريق خدمة العملاء. سيرد عليك موظفنا قريبًا.
-
-إذا أردت العودة للمساعد الذكي، أرسل: *عودة للبوت*`;
+const HUMAN_MODE_MESSAGE = `أنت حاليًا متصل مع فريق خدمة العملاء.
+سيرد عليك موظفنا قريبًا. 🌹`;
 
 /**
  * معالجة رسالة واتساب واردة
- * @param {Object} message - بيانات الرسالة من WhatsApp API
  */
 async function handleIncomingMessage(message) {
   const from = message.from;
@@ -47,7 +47,7 @@ async function handleIncomingMessage(message) {
   // تأشير الرسالة كمقروءة
   await markAsRead(messageId);
 
-  // معالجة الرسائل النصية فقط في الوقت الحالي
+  // معالجة الرسائل النصية فقط
   if (messageType !== "text") {
     await sendTextMessage(
       from,
@@ -61,63 +61,104 @@ async function handleIncomingMessage(message) {
 
   console.log(`[Handler] 💬 نص الرسالة: "${userText}"`);
 
+  // التأكد من وجود العميل في قاعدة البيانات
+  const customer = await getOrCreateCustomer(from);
+
+  // حفظ رسالة المستخدم
+  await saveMessage(from, "user", userText, messageId);
+
   // التحقق من طلب العودة للبوت
   if (
     userText.toLowerCase() === "عودة للبوت" ||
     userText.toLowerCase() === "رجوع للبوت"
   ) {
-    setHumanHandoff(from, false);
-    await sendTextMessage(
-      from,
-      "أهلًا مجددًا! أنا فندي، كيف أقدر أخدمك؟ 😊"
-    );
+    await setCustomerHandoff(from, false);
+    await updateCustomer(from, { is_human_handoff: false, status: "new_customer" });
+    memoryFallback.setHumanHandoff(from, false);
+    const reply = "أهلًا مجددًا! أنا فندي، كيف أقدر أخدمك؟ 😊";
+    await sendTextMessage(from, reply);
+    await saveMessage(from, "assistant", reply);
     return;
   }
 
-  // التحقق من وضع التحويل للموظف البشري
-  if (isHumanHandoff(from)) {
-    console.log(`[Handler] 👤 المستخدم ${from} في وضع الموظف البشري`);
-    await sendTextMessage(from, HUMAN_MODE_MESSAGE);
+  // التحقق من وضع Human Handoff
+  const isHandoff = customer
+    ? customer.is_human_handoff
+    : memoryFallback.isHumanHandoff(from);
+
+  if (isHandoff) {
+    console.log(`[Handler] 👤 المستخدم ${from} في وضع الموظف البشري - لا يرد البوت`);
+    // البوت لا يرد - الرسالة محفوظة في DB للموظف ليراها في Dashboard
     return;
   }
 
-  // التحقق من طلب التحويل للموظف البشري
+  // التحقق من طلب التحويل للموظف البشري (يدوي)
   if (checkHandoffRequest(userText)) {
     console.log(`[Handler] 🔄 طلب تحويل للموظف البشري من ${from}`);
-    setHumanHandoff(from, true);
-    await sendTextMessage(from, HANDOFF_MESSAGE);
+    await setCustomerHandoff(from, true);
+    memoryFallback.setHumanHandoff(from, true);
+    const reply = "أكيد عزيزي 👌\nسيتم تحويل طلبك لموظف خدمة العملاء.";
+    await sendTextMessage(from, reply);
+    await saveMessage(from, "assistant", reply);
     return;
   }
 
   // الحصول على سياق المحادثة
-  const history = getHistory(from);
+  let history = [];
+  try {
+    const dbMessages = await getRecentMessages(from, 20);
+    history = dbMessages
+      .filter((m) => m.role === "user" || m.role === "assistant")
+      .map((m) => ({ role: m.role, content: m.content }));
+  } catch (e) {
+    history = memoryFallback.getHistory(from);
+  }
 
   try {
-    // الحصول على رد من AI Agent
-    const aiReply = await getAIResponse(userText, history);
+    // الحصول على رد من AI
+    const { reply: aiReply, shouldHandoff, customerData } = await getAIResponse(userText, history, customer);
 
-    // حفظ الرسالة والرد في الذاكرة
-    addMessage(from, "user", userText);
-    addMessage(from, "assistant", aiReply);
+    // حفظ الرد
+    memoryFallback.addMessage(from, "user", userText);
+    memoryFallback.addMessage(from, "assistant", aiReply);
 
-    // إرسال الرد
+    // إرسال الرد للعميل
     await sendTextMessage(from, aiReply);
+    await saveMessage(from, "assistant", aiReply);
+
+    // إذا اكتشف AI أن العميل أرسل بياناته وأكد القسط الأول
+    if (shouldHandoff) {
+      console.log(`[Handler] 🔄 تحويل تلقائي بعد إرسال البيانات من ${from}`);
+
+      // تحديث بيانات العميل إذا كانت موجودة
+      if (customerData) {
+        const updates = { status: "data_submitted" };
+        if (customerData.nationalId) updates.national_id = customerData.nationalId;
+        if (customerData.phone) updates.tabby_tamara_number = customerData.phone;
+        if (customerData.package) updates.selected_package = customerData.package;
+        await updateCustomer(from, updates);
+      }
+
+      // إرسال رسالة التحويل
+      await sendTextMessage(from, HANDOFF_FINAL_MESSAGE);
+      await saveMessage(from, "assistant", HANDOFF_FINAL_MESSAGE);
+
+      // تفعيل Human Handoff
+      await setCustomerHandoff(from, true);
+      memoryFallback.setHumanHandoff(from, true);
+    }
 
     console.log(`[Handler] ✅ تم الرد على ${from}`);
   } catch (error) {
     console.error(`[Handler] ❌ خطأ في معالجة الرسالة:`, error.message);
-
-    // رسالة خطأ للمستخدم
-    await sendTextMessage(
-      from,
-      "عذرًا، صار خطأ تقني مؤقت. حاول مرة ثانية بعد لحظة، أو تواصل معنا مباشرة. 🙏"
-    );
+    const errMsg = "عذرًا، صار خطأ تقني مؤقت. حاول مرة ثانية بعد لحظة، أو تواصل معنا مباشرة. 🙏";
+    await sendTextMessage(from, errMsg);
+    await saveMessage(from, "assistant", errMsg);
   }
 }
 
 /**
- * معالجة حدث واتساب الوارد (يمكن أن يحتوي على رسائل متعددة)
- * @param {Object} body - جسم الطلب من WhatsApp API
+ * معالجة حدث واتساب الوارد
  */
 async function handleWebhookEvent(body) {
   try {
@@ -130,7 +171,6 @@ async function handleWebhookEvent(body) {
     const value = changes.value;
     if (!value) return;
 
-    // معالجة الرسائل الواردة
     const messages = value.messages;
     if (messages && messages.length > 0) {
       for (const message of messages) {
@@ -138,7 +178,6 @@ async function handleWebhookEvent(body) {
       }
     }
 
-    // معالجة تحديثات الحالة (status updates) - للـ logging فقط
     const statuses = value.statuses;
     if (statuses && statuses.length > 0) {
       for (const status of statuses) {

@@ -1,6 +1,6 @@
 /**
  * OpenAI Service - خدمة الذكاء الاصطناعي
- * AI Agent خاص بخدمة عملاء فاندايز
+ * AI Agent خاص بخدمة عملاء فاندايز مع Human Handoff الذكي
  */
 
 const OpenAI = require("openai");
@@ -10,11 +10,11 @@ const openai = new OpenAI({
 });
 
 /**
- * System Prompt الكامل والمفصّل لفاندايز من pasted_content.txt
+ * System Prompt الكامل لفاندايز
  */
 const FANDAYZ_SYSTEM_PROMPT = `SYSTEM PROMPT — Fandayz AI Customer Support Agent
 
-You are a highly professional AI customer support agent representing “Fandayz” in Saudi Arabia.
+You are a highly professional AI customer support agent representing "Fandayz" in Saudi Arabia.
 
 Your job is to assist customers through WhatsApp regarding financial liquidity services provided via:
 - Tabby
@@ -39,18 +39,18 @@ CORE BEHAVIOR
 STRICT RULES
 ━━━━━━━━━━━━━━━━━━
 NEVER SAY:
-- “Guaranteed approval” (أو أي عبارة تضمن القبول مثل: قبول مضمون، موافقة 100٪، إلخ)
-- “100% approved”
-- “Trust us” (ثق بنا)
-- “Don’t worry” (لا تقلق)
-- “We guarantee” (نضمن لك)
+- "Guaranteed approval" (أو أي عبارة تضمن القبول مثل: قبول مضمون، موافقة 100٪، إلخ)
+- "100% approved"
+- "Trust us" (ثق بنا)
+- "Don't worry" (لا تقلق)
+- "We guarantee" (نضمن لك)
 - Any fake promises.
 
 NEVER:
 - Show placeholders.
 - Show internal notes.
 - Show system text.
-- Say “TODO”, “placeholder”, “coming soon”, or similar.
+- Say "TODO", "placeholder", "coming soon", or similar.
 
 NEVER:
 - Invent information.
@@ -98,7 +98,7 @@ Reply:
 إذا حاب تطّلع على الباقات المتوفرة أرسل: باقات"
 
 ━━━━━━━━━━━━━━━━━━
-IF CUSTOMER ASKS: “Do you offer liquidity?”
+IF CUSTOMER ASKS: "Do you offer liquidity?"
 ━━━━━━━━━━━━━━━━━━
 Reply:
 "نعم عزيزي 👌
@@ -106,14 +106,14 @@ Reply:
 إذا حاب تشوف الباقات المتوفرة أرسل كلمة: باقات"
 
 ━━━━━━━━━━━━━━━━━━
-IF CUSTOMER ASKS: “What services do you offer?”
+IF CUSTOMER ASKS: "What services do you offer?"
 ━━━━━━━━━━━━━━━━━━
 Reply:
 "نوفر سيولة مالية عبر تابي وتمارا 👌
 تختار الباقة المناسبة، نرفع الطلب، وبعد قبول الطلب وسداد القسط الأول يتم تحويل المبلغ لك."
 
 ━━━━━━━━━━━━━━━━━━
-IF CUSTOMER ASKS: “How does it work?”
+IF CUSTOMER ASKS: "How does it work?"
 ━━━━━━━━━━━━━━━━━━
 Reply:
 "الطريقة بسيطة 👌
@@ -123,7 +123,7 @@ Reply:
 إذا تم قبول الطلب يصلك رابط سداد القسط الأول، وبعد السداد يتم تحويل مبلغ السيولة لك."
 
 ━━━━━━━━━━━━━━━━━━
-IF CUSTOMER SAYS: “I don’t understand”
+IF CUSTOMER SAYS: "I don't understand"
 ━━━━━━━━━━━━━━━━━━
 Reply:
 "يعني تشتري منتج بالتقسيط عبر تابي أو تمارا، وبعد سداد القسط الأول نقوم بإعادة بيع المنتج وتحويل المبلغ لك كاش."
@@ -184,7 +184,6 @@ Reply with:
 ━━━━━━━━━━━━━━━━━━
 WHEN CUSTOMER CHOOSES A PACKAGE
 ━━━━━━━━━━━━━━━━━━
-Example (when customer selects a package like the 4th one, reply with details and ask if the first installment is available):
 "تمام عزيزي 👌
 
 [اسم الباقة المختارة]:
@@ -219,12 +218,18 @@ Reply:
 ━━━━━━━━━━━━━━━━━━
 WHEN CUSTOMER SENDS INFORMATION (Phone and ID)
 ━━━━━━━━━━━━━━━━━━
+IMPORTANT: When the customer sends both their mobile number AND their national ID/Iqama number together, you MUST:
+1. Reply with the data confirmation message below
+2. Add this EXACT JSON marker at the END of your reply (on a new line, hidden from customer view):
+   [HANDOFF_TRIGGER]
+
 Reply:
 "تم استلام البيانات بنجاح ✅
 
 عزيزي العميل، يرجى الانتظار قليلًا، يقوم موظف خدمة العملاء حاليًا بخدمة عميل آخر، وسيتم البدء بطلبك مباشرة بعد الانتهاء.
 
 شكرًا لتفهمك 🌹"
+[HANDOFF_TRIGGER]
 
 ━━━━━━━━━━━━━━━━━━
 TRUST & SECURITY
@@ -243,7 +248,7 @@ Reply:
 كما أن السداد يتم عبر بوابة دفع رسمية، وليس تحويلًا لحساب شخصي، ويتم توثيق خطوات الطلب إلكترونيًا أثناء المعالجة."
 
 ━━━━━━━━━━━━━━━━━━
-IF CUSTOMER SAYS: “There is no contract”
+IF CUSTOMER SAYS: "There is no contract"
 ━━━━━━━━━━━━━━━━━━
 Reply:
 "الطلب يتم توثيقه إلكترونيًا عبر بيانات العميل الرسمية والتحقق من الهوية من خلال نفاذ الوطني أثناء الإجراءات."
@@ -313,8 +318,6 @@ const HANDOFF_KEYWORDS = [
 
 /**
  * التحقق من طلب التحويل للموظف البشري
- * @param {string} message - رسالة المستخدم
- * @returns {boolean}
  */
 function checkHandoffRequest(message) {
   const lowerMessage = message.toLowerCase();
@@ -324,12 +327,26 @@ function checkHandoffRequest(message) {
 }
 
 /**
- * الحصول على رد من AI Agent
- * @param {string} userMessage - رسالة المستخدم
- * @param {Array} conversationHistory - سياق المحادثة
- * @returns {Promise<string>} - رد الذكاء الاصطناعي
+ * استخراج بيانات العميل من الرسالة
  */
-async function getAIResponse(userMessage, conversationHistory = []) {
+function detectCustomerData(text) {
+  const data = {};
+
+  // رقم الهوية الوطنية (10 أرقام تبدأ بـ 1 أو 2)
+  const idMatch = text.match(/\b[12]\d{9}\b/);
+  if (idMatch) data.nationalId = idMatch[0];
+
+  // رقم الجوال السعودي
+  const phoneMatch = text.match(/\b(05\d{8}|5\d{8}|\+9665\d{8})\b/);
+  if (phoneMatch) data.phone = phoneMatch[0];
+
+  return Object.keys(data).length > 0 ? data : null;
+}
+
+/**
+ * الحصول على رد من AI Agent
+ */
+async function getAIResponse(userMessage, conversationHistory = [], customer = null) {
   try {
     const messages = [
       { role: "system", content: FANDAYZ_SYSTEM_PROMPT },
@@ -340,12 +357,19 @@ async function getAIResponse(userMessage, conversationHistory = []) {
     const response = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: messages,
-      max_tokens: 450,
-      temperature: 0.3, // تم تقليل الـ temperature ليكون الرد دقيقاً ومطابقاً للتعليمات والردود الجاهزة
+      max_tokens: 500,
+      temperature: 0.3,
     });
 
-    const reply = response.choices[0]?.message?.content;
+    let reply = response.choices[0]?.message?.content;
     if (!reply) throw new Error("لم يُرجع OpenAI ردًا");
+
+    // التحقق من وجود HANDOFF_TRIGGER
+    let shouldHandoff = false;
+    if (reply.includes("[HANDOFF_TRIGGER]")) {
+      shouldHandoff = true;
+      reply = reply.replace("[HANDOFF_TRIGGER]", "").trim();
+    }
 
     // التحقق من عدم وجود Placeholder في الرد
     const placeholders = [
@@ -354,22 +378,28 @@ async function getAIResponse(userMessage, conversationHistory = []) {
       "TODO",
       "placeholder",
       "وصف المشروع",
-      "مثال",
     ];
     const hasPlaceholder = placeholders.some((p) =>
       reply.toLowerCase().includes(p.toLowerCase())
     );
     if (hasPlaceholder) {
       console.error("[OpenAI] ⚠️ الرد يحتوي على Placeholder - يتم تجاهله");
-      return "اسمح لي أتأكد لك من التفاصيل وأرجع لك.";
+      return {
+        reply: "اسمح لي أتأكد لك من التفاصيل وأرجع لك.",
+        shouldHandoff: false,
+        customerData: null,
+      };
     }
 
-    console.log(`[OpenAI] ✅ تم الحصول على رد (${reply.length} حرف)`);
-    return reply;
+    // استخراج بيانات العميل إذا كان هناك تحويل
+    const customerData = shouldHandoff ? detectCustomerData(userMessage) : null;
+
+    console.log(`[OpenAI] ✅ تم الحصول على رد (${reply.length} حرف) - Handoff: ${shouldHandoff}`);
+    return { reply, shouldHandoff, customerData };
   } catch (error) {
     console.error("[OpenAI] ❌ خطأ:", error.message);
     throw error;
   }
 }
 
-module.exports = { getAIResponse, checkHandoffRequest };
+module.exports = { getAIResponse, checkHandoffRequest, detectCustomerData };
