@@ -1,7 +1,6 @@
 /**
  * Message Handler - معالج الرسائل الرئيسي
- * يستقبل رسائل واتساب ويعالجها ويرد عليها
- * مع دعم Human Handoff الكامل وحفظ البيانات في Supabase
+ * يستقبل رسائل واتساب ويعالجها مع State Machine كامل
  */
 
 const { sendTextMessage, markAsRead } = require("../services/whatsapp");
@@ -9,12 +8,26 @@ const { getAIResponse, checkHandoffRequest, detectCustomerData } = require("../s
 const {
   getOrCreateCustomer,
   updateCustomer,
-  getCustomerHandoffStatus,
+  updateCustomerState,
   setCustomerHandoff,
   saveMessage,
   getRecentMessages,
+  isMessageProcessed,
+  markMessageProcessed,
+  getActivePackages,
+  formatPackagesMessage,
+  detectSelectedPackage,
 } = require("../services/supabase");
-// Fallback in-memory for when Supabase is not configured
+const {
+  STATES,
+  determineNextState,
+} = require("../services/stateMachine");
+const {
+  notifyNewCustomer,
+  notifyDataSubmitted,
+  notifyBotError,
+} = require("../services/telegram");
+// Fallback in-memory
 const memoryFallback = require("../services/memory");
 
 /**
@@ -29,12 +42,6 @@ const HANDOFF_FINAL_MESSAGE = `تم استلام بياناتك ✅
 شكرًا لتواصلك معنا 🌹`;
 
 /**
- * رسالة وضع الموظف البشري (عندما يكون التحويل مفعّلًا)
- */
-const HUMAN_MODE_MESSAGE = `أنت حاليًا متصل مع فريق خدمة العملاء.
-سيرد عليك موظفنا قريبًا. 🌹`;
-
-/**
  * معالجة رسالة واتساب واردة
  */
 async function handleIncomingMessage(message) {
@@ -44,57 +51,71 @@ async function handleIncomingMessage(message) {
 
   console.log(`[Handler] 📨 رسالة جديدة من ${from} - النوع: ${messageType}`);
 
+  // ===== Anti-Duplicate: منع معالجة نفس الرسالة مرتين =====
+  if (messageId) {
+    const alreadyProcessed = await isMessageProcessed(messageId);
+    if (alreadyProcessed) {
+      console.log(`[Handler] ⚠️ رسالة مكررة تجاهلتها: ${messageId}`);
+      return;
+    }
+    await markMessageProcessed(messageId);
+  }
+
   // تأشير الرسالة كمقروءة
-  await markAsRead(messageId);
+  try {
+    await markAsRead(messageId);
+  } catch (e) {
+    console.warn("[Handler] تعذر تأشير الرسالة كمقروءة:", e.message);
+  }
 
   // معالجة الرسائل النصية فقط
   if (messageType !== "text") {
-    await sendTextMessage(
-      from,
-      "عذرًا، في الوقت الحالي أقدر أستقبل الرسائل النصية فقط. كيف أقدر أساعدك؟ 😊"
-    );
+    const reply = "عذرًا، في الوقت الحالي أقدر أستقبل الرسائل النصية فقط. كيف أقدر أساعدك؟";
+    await sendTextMessage(from, reply);
+    await saveMessage(from, "assistant", reply);
     return;
   }
 
   const userText = message.text?.body?.trim();
   if (!userText) return;
 
-  console.log(`[Handler] 💬 نص الرسالة: "${userText}"`);
+  console.log(`[Handler] 💬 "${userText}"`);
 
-  // التأكد من وجود العميل في قاعدة البيانات
-  const customer = await getOrCreateCustomer(from);
+  // الحصول على بيانات العميل
+  let customer = await getOrCreateCustomer(from);
+  const isNewCustomer = !customer || customer.state_machine_status === STATES.START;
+
+  // إشعار Telegram للعميل الجديد
+  if (isNewCustomer && customer) {
+    await notifyNewCustomer(from).catch(() => {});
+  }
 
   // حفظ رسالة المستخدم
   await saveMessage(from, "user", userText, messageId);
 
   // التحقق من طلب العودة للبوت
-  if (
-    userText.toLowerCase() === "عودة للبوت" ||
-    userText.toLowerCase() === "رجوع للبوت"
-  ) {
+  const resetKeywords = ["عودة للبوت", "رجوع للبوت", "ابدأ من جديد", "restart"];
+  if (resetKeywords.some(k => userText.toLowerCase().includes(k))) {
     await setCustomerHandoff(from, false);
-    await updateCustomer(from, { is_human_handoff: false, status: "new_customer" });
+    await updateCustomerState(from, STATES.START);
     memoryFallback.setHumanHandoff(from, false);
-    const reply = "أهلًا مجددًا! أنا فندي، كيف أقدر أخدمك؟ 😊";
+    const reply = "أهلًا مجددًا! كيف أقدر أخدمك؟ 😊";
     await sendTextMessage(from, reply);
     await saveMessage(from, "assistant", reply);
     return;
   }
 
   // التحقق من وضع Human Handoff
-  const isHandoff = customer
-    ? customer.is_human_handoff
-    : memoryFallback.isHumanHandoff(from);
-
+  const isHandoff = customer?.is_human_handoff || memoryFallback.isHumanHandoff(from);
   if (isHandoff) {
-    console.log(`[Handler] 👤 المستخدم ${from} في وضع الموظف البشري - لا يرد البوت`);
-    // البوت لا يرد - الرسالة محفوظة في DB للموظف ليراها في Dashboard
+    console.log(`[Handler] 👤 ${from} في وضع الموظف البشري - لا يرد البوت`);
+    // الرسالة محفوظة في DB للموظف ليراها في Dashboard
     return;
   }
 
-  // التحقق من طلب التحويل للموظف البشري (يدوي)
+  // التحقق من طلب التحويل اليدوي
   if (checkHandoffRequest(userText)) {
-    console.log(`[Handler] 🔄 طلب تحويل للموظف البشري من ${from}`);
+    console.log(`[Handler] 🔄 طلب تحويل يدوي من ${from}`);
     await setCustomerHandoff(from, true);
     memoryFallback.setHumanHandoff(from, true);
     const reply = "أكيد عزيزي 👌\nسيتم تحويل طلبك لموظف خدمة العملاء.";
@@ -103,41 +124,79 @@ async function handleIncomingMessage(message) {
     return;
   }
 
+  // الحصول على الباقات من قاعدة البيانات
+  const packages = await getActivePackages();
+
   // الحصول على سياق المحادثة
   let history = [];
   try {
-    const dbMessages = await getRecentMessages(from, 20);
+    const dbMessages = await getRecentMessages(from, 10);
     history = dbMessages
-      .filter((m) => m.role === "user" || m.role === "assistant")
-      .map((m) => ({ role: m.role, content: m.content }));
+      .filter(m => m.role === "user" || m.role === "assistant")
+      .map(m => ({ role: m.role, content: m.content }));
   } catch (e) {
     history = memoryFallback.getHistory(from);
   }
 
   try {
-    // الحصول على رد من AI
-    const { reply: aiReply, shouldHandoff, customerData } = await getAIResponse(userText, history, customer);
+    // الحصول على رد من AI مع مراعاة المرحلة الحالية
+    const { reply: aiReply, shouldHandoff, customerData } = await getAIResponse(
+      userText,
+      history,
+      customer,
+      packages
+    );
 
-    // حفظ الرد
+    // تحديث الذاكرة المؤقتة
     memoryFallback.addMessage(from, "user", userText);
     memoryFallback.addMessage(from, "assistant", aiReply);
 
-    // إرسال الرد للعميل
+    // إرسال الرد
     await sendTextMessage(from, aiReply);
     await saveMessage(from, "assistant", aiReply);
 
-    // إذا اكتشف AI أن العميل أرسل بياناته وأكد القسط الأول
+    // ===== تحديث State Machine =====
+    const currentState = customer?.state_machine_status || STATES.START;
+
+    // اكتشاف الباقة المختارة
+    const selectedPkg = detectSelectedPackage(userText, packages);
+
+    // تحديد المرحلة التالية
+    const context = {
+      selectedPackage: selectedPkg,
+      hasPhoneAndId: !!(customerData?.nationalId && customerData?.phone),
+    };
+    const nextState = determineNextState(currentState, userText, context);
+
+    if (nextState && nextState !== currentState) {
+      const stateUpdates = { state_machine_status: nextState };
+
+      // حفظ الباقة المختارة
+      if (selectedPkg && nextState === STATES.PACKAGE_SELECTED) {
+        stateUpdates.package_id = selectedPkg.id;
+        stateUpdates.selected_package = selectedPkg.name;
+      }
+
+      // حفظ بيانات العميل
+      if (customerData?.nationalId) stateUpdates.national_id = customerData.nationalId;
+      if (customerData?.phone) stateUpdates.tabby_tamara_number = customerData.phone;
+
+      await updateCustomer(from, stateUpdates);
+      console.log(`[Handler] 🔄 State: ${currentState} → ${nextState}`);
+    }
+
+    // ===== تفعيل Human Handoff إذا أرسل البيانات =====
     if (shouldHandoff) {
       console.log(`[Handler] 🔄 تحويل تلقائي بعد إرسال البيانات من ${from}`);
 
-      // تحديث بيانات العميل إذا كانت موجودة
-      if (customerData) {
-        const updates = { status: "data_submitted" };
-        if (customerData.nationalId) updates.national_id = customerData.nationalId;
-        if (customerData.phone) updates.tabby_tamara_number = customerData.phone;
-        if (customerData.package) updates.selected_package = customerData.package;
-        await updateCustomer(from, updates);
-      }
+      // تحديث بيانات العميل
+      const updates = {
+        status: "data_submitted",
+        state_machine_status: STATES.WAITING_REVIEW,
+      };
+      if (customerData?.nationalId) updates.national_id = customerData.nationalId;
+      if (customerData?.phone) updates.tabby_tamara_number = customerData.phone;
+      await updateCustomer(from, updates);
 
       // إرسال رسالة التحويل
       await sendTextMessage(from, HANDOFF_FINAL_MESSAGE);
@@ -146,12 +205,17 @@ async function handleIncomingMessage(message) {
       // تفعيل Human Handoff
       await setCustomerHandoff(from, true);
       memoryFallback.setHumanHandoff(from, true);
+
+      // إشعار Telegram
+      const pkgName = customer?.selected_package || "غير محدد";
+      await notifyDataSubmitted(from, pkgName, customerData?.nationalId).catch(() => {});
     }
 
     console.log(`[Handler] ✅ تم الرد على ${from}`);
   } catch (error) {
-    console.error(`[Handler] ❌ خطأ في معالجة الرسالة:`, error.message);
-    const errMsg = "عذرًا، صار خطأ تقني مؤقت. حاول مرة ثانية بعد لحظة، أو تواصل معنا مباشرة. 🙏";
+    console.error(`[Handler] ❌ خطأ:`, error.message);
+    await notifyBotError(error.message, `من: ${from}`).catch(() => {});
+    const errMsg = "عذرًا، صار خطأ تقني مؤقت. حاول مرة ثانية بعد لحظة. 🙏";
     await sendTextMessage(from, errMsg);
     await saveMessage(from, "assistant", errMsg);
   }
@@ -181,13 +245,12 @@ async function handleWebhookEvent(body) {
     const statuses = value.statuses;
     if (statuses && statuses.length > 0) {
       for (const status of statuses) {
-        console.log(
-          `[Handler] 📊 تحديث حالة: ${status.status} للرسالة ${status.id}`
-        );
+        console.log(`[Handler] 📊 حالة: ${status.status} للرسالة ${status.id}`);
       }
     }
   } catch (error) {
-    console.error("[Handler] ❌ خطأ في معالجة حدث Webhook:", error.message);
+    console.error("[Handler] ❌ خطأ في Webhook:", error.message);
+    await notifyBotError(error.message, "Webhook Handler").catch(() => {});
   }
 }
 
