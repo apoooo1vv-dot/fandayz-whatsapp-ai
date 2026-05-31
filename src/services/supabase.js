@@ -242,6 +242,19 @@ async function saveMessage(phoneNumber, role, content, whatsappMessageId = null)
       return null;
     }
 
+    // تحديث last_message في جدول customers تلقائياً
+    try {
+      const updateData = {
+        last_message: content.substring(0, 100),
+        last_message_role: role,
+        last_interaction_at: new Date().toISOString(),
+      };
+      await db.from('customers').update(updateData).eq('id', customer.id);
+    } catch (updateErr) {
+      // لا نوقف العملية إذا فشل التحديث (ربما العمود غير موجود بعد)
+      console.warn('[Supabase] ⚠️ تعذر تحديث last_message:', updateErr.message);
+    }
+
     console.log(`[Supabase] ✅ رسالة محفوظة [${role}] للعميل ${phoneNumber}`);
     return data;
   } catch (err) {
